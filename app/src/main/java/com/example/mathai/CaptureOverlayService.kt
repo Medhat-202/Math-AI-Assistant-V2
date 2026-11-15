@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -36,6 +37,9 @@ class CaptureOverlayService : Service() {
     private lateinit var windowManager: WindowManager
     private lateinit var handler: Handler
     private lateinit var handlerThread: HandlerThread
+
+    // تحديث واجهة التطبيق من الخيط الرئيسي
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -198,7 +202,7 @@ class CaptureOverlayService : Service() {
             updateStatus("تم تشغيل قراءة الشاشة")
 
         } catch (e: Exception) {
-            updateStatus("تعذر تشغيل تصوير الشاشة")
+            updateStatus("تعذر تشغيل تصوير الشاشة: ${e.message}")
         }
     }
 
@@ -506,6 +510,7 @@ class CaptureOverlayService : Service() {
 
                 if (image == null) {
                     processing = false
+                    updateStatus("لم تصل صورة الشاشة، حاول مرة أخرى")
                     return@postDelayed
                 }
 
@@ -549,32 +554,43 @@ class CaptureOverlayService : Service() {
                 image?.close()
                 bitmap?.recycle()
                 processing = false
-                updateStatus("حدث خطأ أثناء التقاط الشاشة")
+                updateStatus("حدث خطأ أثناء التقاط الشاشة: ${e.message}")
             }
 
         }, 250)
     }
 
     private fun recognizeBitmap(bitmap: Bitmap) {
-        val inputImage = InputImage.fromBitmap(bitmap, 0)
+        try {
+            val inputImage = InputImage.fromBitmap(bitmap, 0)
 
-        recognizer.process(inputImage)
-            .addOnSuccessListener { result ->
-                val expression = extractExpression(result.text)
+            recognizer.process(inputImage)
+                .addOnSuccessListener { result ->
+                    val expression = extractExpression(result.text)
 
-                if (expression == null) {
-                    updateStatus("لم أجد مسألة مقارنة واضحة")
-                } else {
-                    solveExpression(expression)
+                    if (expression == null) {
+                        updateStatus("لم أجد مسألة مقارنة واضحة")
+                    } else {
+                        solveExpression(expression)
+                    }
                 }
-            }
-            .addOnFailureListener {
-                updateStatus("تعذرت قراءة السؤال")
-            }
-            .addOnCompleteListener {
+                .addOnFailureListener {
+                    updateStatus("تعذرت قراءة السؤال")
+                }
+                .addOnCompleteListener {
+                    if (!bitmap.isRecycled) {
+                        bitmap.recycle()
+                    }
+                    processing = false
+                }
+
+        } catch (e: Exception) {
+            if (!bitmap.isRecycled) {
                 bitmap.recycle()
-                processing = false
             }
+            processing = false
+            updateStatus("حدث خطأ في التعرف على النص")
+        }
     }
 
     private fun extractExpression(text: String): String? {
@@ -673,17 +689,21 @@ class CaptureOverlayService : Service() {
         updateStatus("تم إرسال أمر الضغط")
     }
 
+    // التعديل الأساسي: تحديث الواجهة على الخيط الرئيسي
     private fun updateStatus(message: String) {
-        if (!::handler.isInitialized) return
-
-        handler.post {
+        mainHandler.post {
             statusText?.text = message
         }
     }
 
     override fun onDestroy() {
         autoRead = false
-        handler.removeCallbacksAndMessages(null)
+
+        if (::handler.isInitialized) {
+            handler.removeCallbacksAndMessages(null)
+        }
+
+        mainHandler.removeCallbacksAndMessages(null)
 
         try {
             mainPanel?.let {
@@ -705,7 +725,9 @@ class CaptureOverlayService : Service() {
         projection?.stop()
         recognizer.close()
 
-        handlerThread.quitSafely()
+        if (::handlerThread.isInitialized) {
+            handlerThread.quitSafely()
+        }
 
         super.onDestroy()
     }
